@@ -1,0 +1,101 @@
+FROM docker.io/nvidia/cuda:12.1.1-cudnn8-devel-ubuntu20.04
+
+# Set environment to non-interactive
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set environment variables for CUDA and PATH
+ENV PATH="/opt/conda/bin:${PATH}" \
+    LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}" \
+    CUDA_HOME="/usr/local/cuda"
+
+# Install Miniconda
+RUN apt-get update && apt-get install -y \
+    wget bzip2 git python3-pip python3-dev zip && \
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm /tmp/miniconda.sh && \
+    apt-get clean
+
+# Set the default shell to use bash
+SHELL ["/bin/bash", "-c"]
+
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+
+# RUN git clone https://github.com/insait-institute/USDNet.git && cd USDNet
+# WORKDIR /USDNet
+
+WORKDIR /USDNet
+COPY . /USDNet/
+
+RUN conda create -n usdnet python=3.10.9 -y
+RUN conda run -n usdnet conda install -c conda-forge pycocotools
+
+RUN conda run -n usdnet python -m pip install "pip==23.1"
+RUN conda run -n usdnet python -m pip install "setuptools<70"
+# RUN conda run -n usdnet pip3 install omegaconf==2.0.6
+RUN conda run -n usdnet pip3 install omegaconf==2.0.6
+RUN conda run -n usdnet conda install -y pyyaml=5.4.1
+
+RUN conda env update -n usdnet -f environment.yml
+
+
+
+# # Activate the environment and install PyTorch, Torchvision, and CUDA toolkit
+# RUN source /opt/conda/etc/profile.d/conda.sh && \
+#     conda activate usdnet && \
+#     pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+RUN conda run -n usdnet pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+RUN conda run -n usdnet pip install torch-scatter -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
+RUN conda run -n usdnet pip3 install 'git+https://github.com/facebookresearch/detectron2.git@710e7795d0eeadf9def0e7ef957eea13532e34cf' --no-deps
+RUN conda run -n usdnet pip install usd-core
+RUN conda run -n usdnet pip install pytorch-lightning==1.7.2 torchmetrics==0.9.3 h5py==3.6.0
+
+RUN apt-get update && apt-get install -y libgl1
+
+
+# Supply CUDA arch list so extensions compile without a visible GPU
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9" \
+    MAX_JOBS=8
+# extra Python build deps often needed by setup.py builds
+RUN conda run -n usdnet python -m pip install --no-cache-dir "numpy<2" cython ninja
+RUN apt-get update && apt-get install -y \
+    libopenblas-dev libblas-dev liblapack-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /USDNet/third_party
+# Clone and install MinkowskiEngine
+# RUN git clone --recursive https://github.com/NVIDIA/MinkowskiEngine && \
+#     cd MinkowskiEngine && \
+#     conda run -n usdnet python setup.py install --force_cuda --blas=openblas
+RUN git clone --recursive https://github.com/NVIDIA/MinkowskiEngine && \
+    cd MinkowskiEngine && \
+    git checkout 02fc608bea4c0549b0a7b00ca1bf15dee4a0b228 && \
+    sed -i '1i #include <thrust/execution_policy.h>' src/convolution_kernel.cuh && \
+    sed -i '1i #include <thrust/unique.h>\n#include <thrust/remove.h>' src/coordinate_map_gpu.cu && \
+    sed -i '1i #include <thrust/execution_policy.h>\n#include <thrust/reduce.h>\n#include <thrust/sort.h>' src/spmm.cu && \
+    sed -i '1i #include <thrust/execution_policy.h>' src/3rdparty/concurrent_unordered_map.cuh && \
+    find src -type f -name "*.cu" -o -name "*.cuh" -o -name "*.hpp" | \
+      xargs sed -i 's/thrust::device/thrust::cuda::par/g' && \
+    conda run -n usdnet python setup.py install --force_cuda --blas=openblas
+
+WORKDIR /USDNet/third_party
+RUN git clone https://github.com/ScanNet/ScanNet.git && \
+    cd ScanNet/Segmentator && \
+    git checkout 3e5726500896748521a6ceb81271b0f5b2c0e7d2 && \
+    make && \
+    cd ../../pointnet2 && \
+    conda run -n usdnet python setup.py install && \
+    cd ../../ && \
+    conda run -n usdnet pip install pytorch-lightning==1.7.2
+
+# Ensure conda initializes bash
+RUN conda init bash
+
+# Configure conda to always activate usdnet
+RUN echo "conda activate usdnet" >> /root/.bashrc
+
+# Default shell is bash so .bashrc runs
+SHELL ["/bin/bash", "-c"]
+
+CMD ["python3"]
